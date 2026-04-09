@@ -148,30 +148,19 @@ function sendBookingEmail() {
 }
 
 // --- Firestore booking helpers ---
-async function loadBookingsFromFirestore() {
-    const snapshot = await db.collection('bookings').get();
-    bookings = {};
-    snapshot.forEach(doc => {
-        const data = doc.data();
-        if (!bookings[data.date]) bookings[data.date] = [];
-        bookings[data.date].push({ ...data, _id: doc.id });
-    });
-}
-async function saveBookingToFirestore(booking) {
-    await db.collection('bookings').add(booking);
-}
-async function deleteBookingFromFirestore(id) {
-    await db.collection('bookings').doc(id).delete();
-}
-async function updateBookingInFirestore(id, newData) {
-    await db.collection('bookings').doc(id).update(newData);
+// --- Booking helpers (localStorage only) ---
+function addBooking(booking) {
+    if (!bookings[booking.date]) bookings[booking.date] = [];
+    bookings[booking.date].push(booking);
+    saveBookings();
 }
 
 
 // --- Patch booking actions ---
 // On page load, load availability and bookings from Firestore, then render
 loadAvailability();
-loadBookingsFromFirestore().then(render);
+loadBookings();
+render();
 
 // --- LocalStorage persistence for bookings ---
 function saveBookings() {
@@ -191,6 +180,7 @@ function loadBookings() {
 
 // Helper to update the UI
 function render() {
+    console.log('[DEBUG] render() called, view:', view, 'step:', step);
     const root = document.getElementById('app-root');
     if (!root) return;
     root.innerHTML = '';
@@ -209,24 +199,30 @@ function render() {
 
     // Hidden admin trigger: click logo 3 times
     if (!window._amkLogoClicks) window._amkLogoClicks = 0;
-    setTimeout(() => {
-        const logo = document.getElementById('logo-amk');
-        if (logo) {
-            logo.onclick = () => {
-                window._amkLogoClicks++;
-                if (window._amkLogoClicks >= 3) {
-                    window._amkLogoClicks = 0;
-                    view = 'admin';
-                    render();
-                }
-                setTimeout(() => { window._amkLogoClicks = 0; }, 2000);
-            };
-        }
-        const navBook = document.getElementById('nav-book');
-        if (navBook) navBook.onclick = () => { view = 'book'; step = 1; render(); };
-        const navManage = document.getElementById('nav-manage');
-        if (navManage) navManage.onclick = () => { view = 'manage'; manageStep = 1; foundBookings = []; bookingToEdit = null; render(); };
-    }, 0);
+    const logo = document.getElementById('logo-amk');
+    if (logo) {
+        logo.onclick = () => {
+            window._amkLogoClicks++;
+            if (window._amkLogoClicks >= 3) {
+                window._amkLogoClicks = 0;
+                view = 'admin';
+                render();
+            }
+            setTimeout(() => { window._amkLogoClicks = 0; }, 2000);
+        };
+    }
+    const navBook = document.getElementById('nav-book');
+    if (navBook) navBook.onclick = () => {
+        view = 'book';
+        step = 1;
+        selectedService = null;
+        selectedDay = null;
+        selectedSlot = null;
+        clientInfo = { name: '', phone: '', email: '' };
+        render();
+    };
+    const navManage = document.getElementById('nav-manage');
+    if (navManage) navManage.onclick = () => { view = 'manage'; manageStep = 1; foundBookings = []; bookingToEdit = null; render(); };
 
     // Main
     const main = document.createElement('main');
@@ -399,7 +395,7 @@ function render() {
             bookBtn.className = 'btn';
             bookBtn.textContent = 'Book';
             bookBtn.disabled = !(clientInfo.name && clientInfo.phone);
-            bookBtn.onclick = async () => {
+            bookBtn.onclick = () => {
                 // Confirm booking
                 if (!selectedDay || !selectedSlot || !selectedService) return;
                 const booking = {
@@ -409,8 +405,7 @@ function render() {
                     service: selectedService,
                     date: getDayKey(selectedDay)
                 };
-                await saveBookingToFirestore(booking);
-                await loadBookingsFromFirestore();
+                addBooking(booking);
                 sendBookingEmail();
                 step = 4;
                 render();
