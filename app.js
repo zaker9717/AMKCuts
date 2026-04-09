@@ -150,9 +150,10 @@ async function updateBookingInFirestore(id, newData) {
     await db.collection('bookings').doc(id).update(newData);
 }
 
+
 // --- Patch booking actions ---
-// On page load, load bookings from Firestore
-await loadBookingsFromFirestore();
+// On page load, load bookings from Firestore, then render
+loadBookingsFromFirestore().then(render);
 
 // --- LocalStorage persistence for bookings ---
 function saveBookings() {
@@ -169,7 +170,9 @@ function loadBookings() {
     }
 }
 // Load bookings on page load
+
 loadBookings();
+render();
 
 // Helper to update the UI
 function render() {
