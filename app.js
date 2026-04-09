@@ -79,6 +79,23 @@ let availability = {
     5: { open: true, start: 9, end: 19 },
     6: { open: true, start: 10, end: 17 },
 };
+
+function saveAvailability() {
+    localStorage.setItem('barber_availability', JSON.stringify(availability));
+}
+
+function loadAvailability() {
+    const data = localStorage.getItem('barber_availability');
+    if (data) {
+        try {
+            const parsed = JSON.parse(data);
+            // Only update keys that exist to avoid breaking structure
+            for (let i = 0; i < 7; i++) {
+                if (parsed[i]) availability[i] = parsed[i];
+            }
+        } catch (e) { }
+    }
+}
 let adminTab = "schedule";
 
 // Manage Booking state
@@ -152,7 +169,8 @@ async function updateBookingInFirestore(id, newData) {
 
 
 // --- Patch booking actions ---
-// On page load, load bookings from Firestore, then render
+// On page load, load availability and bookings from Firestore, then render
+loadAvailability();
 loadBookingsFromFirestore().then(render);
 
 // --- LocalStorage persistence for bookings ---
@@ -169,10 +187,7 @@ function loadBookings() {
         }
     }
 }
-// Load bookings on page load
 
-loadBookings();
-render();
 
 // Helper to update the UI
 function render() {
@@ -515,14 +530,17 @@ function render() {
                     FULL_DAYS.forEach((day, i) => {
                         document.getElementById(`open-${i}`).onchange = e => {
                             availability[i].open = e.target.checked;
+                            saveAvailability();
                             render();
                         };
                         document.getElementById(`start-${i}`).onchange = e => {
                             availability[i].start = parseInt(e.target.value);
+                            saveAvailability();
                             render();
                         };
                         document.getElementById(`end-${i}`).onchange = e => {
                             availability[i].end = parseInt(e.target.value);
+                            saveAvailability();
                             render();
                         };
                     });
