@@ -332,7 +332,8 @@ main.main {
     color: #a855f7;
 }
 
-.slot-btn.selected {
+.slot-btn.selected,
+.slot-btn.selected:hover:not(:disabled) {
     background: #a855f7;
     border-color: #a855f7;
     color: #fff;

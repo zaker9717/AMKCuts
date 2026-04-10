@@ -82,6 +82,11 @@ function normalizePhone(phone) {
     return String(phone || "").replace(/\D/g, "");
 }
 
+function isValidEmail(email) {
+    const value = String(email || "").trim();
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 function generateBookingCode() {
     // Human-friendly 6-digit code to retrieve/manage a booking later.
     return String(Math.floor(100000 + Math.random() * 900000));
@@ -1031,7 +1036,7 @@ function render() {
             // Phone
             const groupPhone = document.createElement('div');
             groupPhone.className = 'form-group';
-            groupPhone.innerHTML = '<label>Phone Number</label>';
+            groupPhone.innerHTML = '<label>Phone Number (recommended)</label>';
             const phoneInput = document.createElement('input');
             phoneInput.placeholder = '(555) 000-0000';
             phoneInput.value = clientInfo.phone;
@@ -1040,11 +1045,19 @@ function render() {
             // Email
             const groupEmail = document.createElement('div');
             groupEmail.className = 'form-group';
-            groupEmail.innerHTML = '<label>Email (for reminder)</label>';
+            groupEmail.innerHTML = '<label>Email (required for confirmation & manage booking)</label>';
             const emailInput = document.createElement('input');
+            emailInput.type = 'email';
             emailInput.placeholder = 'you@email.com';
             emailInput.value = clientInfo.email;
             groupEmail.appendChild(emailInput);
+
+            const emailHint = document.createElement('div');
+            emailHint.className = 'error-msg';
+            emailHint.style.display = 'none';
+            emailHint.textContent = 'Please enter a valid email address.';
+            groupEmail.appendChild(emailHint);
+
             main.appendChild(groupEmail);
             // Reminder note
             const reminder = document.createElement('div');
@@ -1062,11 +1075,22 @@ function render() {
             const bookBtn = document.createElement('button');
             bookBtn.className = 'btn';
             bookBtn.textContent = 'Book';
-            bookBtn.disabled = !(clientInfo.name && clientInfo.phone);
+            const canSubmitBooking = () => !!String(clientInfo.name || '').trim() && isValidEmail(clientInfo.email);
+            const updateEmailValidationUI = () => {
+                const trimmedEmail = String(clientInfo.email || '').trim();
+                const showEmailHint = trimmedEmail.length > 0 && !isValidEmail(trimmedEmail);
+                emailHint.style.display = showEmailHint ? 'block' : 'none';
+                emailInput.style.borderColor = showEmailHint ? '#d32f2f' : '';
+                bookBtn.disabled = !canSubmitBooking();
+            };
+            bookBtn.disabled = !canSubmitBooking();
 
             const handleBooking = async () => {
                 // Confirm booking
-                if (!selectedDay || !selectedSlot || !selectedService) return;
+                if (!selectedDay || !selectedSlot || !selectedService || !canSubmitBooking()) {
+                    alert('Please enter your full name and a valid email address.');
+                    return;
+                }
                 const booking = {
                     hour: selectedSlot.hour,
                     label: selectedSlot.label,
@@ -1114,15 +1138,18 @@ function render() {
             // --- Input event handlers for smooth typing ---
             nameInput.oninput = function (e) {
                 clientInfo.name = e.target.value;
-                bookBtn.disabled = !(clientInfo.name && clientInfo.phone);
+                updateEmailValidationUI();
             };
             phoneInput.oninput = function (e) {
                 clientInfo.phone = e.target.value;
-                bookBtn.disabled = !(clientInfo.name && clientInfo.phone);
+                updateEmailValidationUI();
             };
             emailInput.oninput = function (e) {
                 clientInfo.email = e.target.value;
+                updateEmailValidationUI();
             };
+
+            updateEmailValidationUI();
         }
         // Step 4: Confirmation
         if (step === 4) {
