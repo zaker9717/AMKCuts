@@ -34,6 +34,7 @@ const firebaseConfig = {
 
 const BOOKINGS_COLLECTION = "bookings";
 const MANAGE_LOOKUP_COOLDOWN_MS = 5000;
+const CANCELLED_BOOKINGS_STORAGE_KEY = "barber_cancelled_bookings";
 let db = null;
 
 if (typeof firebase !== "undefined" && firebase.apps) {
@@ -42,14 +43,11 @@ if (typeof firebase !== "undefined" && firebase.apps) {
     }
     db = firebase.firestore();
     try {
-        // Safari + localhost can fail Firestore streaming; force long polling and merge settings safely.
-        db.settings({
-            experimentalForceLongPolling: true,
-            useFetchStreams: false,
-            merge: true
-        });
-    } catch (error) {
-        console.warn("Could not apply Firestore transport settings.", error);
+        // Fixes Firestore Listen/channel CORS issues in some local browser environments.
+        db.settings({ experimentalForceLongPolling: true, useFetchStreams: false });
+    } catch (e) {
+        // Ignore if settings were already frozen by first Firestore use.
+        console.warn("Firestore settings were already initialized.", e);
     }
 } else {
     console.warn("Firebase compat SDK was not found. Falling back to localStorage only.");
@@ -92,6 +90,62 @@ function saveBookings() {
     localStorage.setItem("barber_bookings", JSON.stringify(bookings));
 }
 
+function loadCancelledBookings() {
+    try {
+        return new Set(JSON.parse(localStorage.getItem(CANCELLED_BOOKINGS_STORAGE_KEY) || "[]"));
+    } catch (e) {
+        return new Set();
+    }
+}
+
+function saveCancelledBookings(cancelledIds) {
+    localStorage.setItem(CANCELLED_BOOKINGS_STORAGE_KEY, JSON.stringify(Array.from(cancelledIds)));
+}
+
+let cancelledBookingIds = loadCancelledBookings();
+
+// Reset old local-only cancellation markers now that Firestore cancellations are authoritative.
+if (cancelledBookingIds.size) {
+    cancelledBookingIds = new Set();
+    saveCancelledBookings(cancelledBookingIds);
+}
+
+function isLocallyCancelledBooking(bookingId) {
+    return !!bookingId && cancelledBookingIds.has(bookingId);
+}
+
+function markBookingCancelledLocally(bookingId) {
+    if (!bookingId) return;
+    cancelledBookingIds.add(bookingId);
+    saveCancelledBookings(cancelledBookingIds);
+}
+
+function clearBookingCancelledLocally(bookingId) {
+    if (!bookingId || !cancelledBookingIds.has(bookingId)) return;
+    cancelledBookingIds.delete(bookingId);
+    saveCancelledBookings(cancelledBookingIds);
+}
+
+function pruneCancelledBookingsFromState() {
+    let changed = false;
+    Object.keys(bookings).forEach((dateKey) => {
+        const filtered = (bookings[dateKey] || []).filter((booking) => {
+            if (isLocallyCancelledBooking(booking._id)) {
+                changed = true;
+                return false;
+            }
+            return true;
+        });
+        if (filtered.length) {
+            bookings[dateKey] = filtered;
+        } else if (bookings[dateKey]) {
+            delete bookings[dateKey];
+            changed = true;
+        }
+    });
+    return changed;
+}
+
 function loadBookings() {
     const data = localStorage.getItem("barber_bookings");
     if (data) {
@@ -100,6 +154,9 @@ function loadBookings() {
         } catch (e) {
             bookings = {};
         }
+    }
+    if (pruneCancelledBookingsFromState()) {
+        saveBookings();
     }
 }
 
@@ -173,6 +230,25 @@ function isFirestoreUnavailableError(error) {
     );
 }
 
+function mapManagedBookingError(error) {
+    const code = String(error?.code || "").toLowerCase();
+    const msg = String(error?.message || "");
+
+    if (code.includes("permission-denied")) {
+        return new Error("Cancellation was denied by Firestore. Confirm you used the same phone and booking code, then try again.");
+    }
+    if (code.includes("not-found")) {
+        return new Error("Booking was not found. It may already be cancelled.");
+    }
+    if (code.includes("failed-precondition") || code.includes("aborted")) {
+        return new Error("This booking changed while you were editing it. Refresh and try again.");
+    }
+    if (code.includes("internal")) {
+        return new Error("Server is temporarily unavailable. Please try again.");
+    }
+    return new Error(msg || "Could not update this booking right now.");
+}
+
 async function saveBookingToFirestore(booking) {
     if (!db) {
         return { ...normalizeBooking(booking), _id: `${booking.date}_${booking.hour}` };
@@ -192,7 +268,15 @@ async function saveBookingToFirestore(booking) {
     };
 
     try {
-        if (typeof ref.create === "function") {
+        const existing = await ref.get();
+        if (existing.exists) {
+            const existingStatus = String(existing.data()?.status || "active").toLowerCase();
+            if (existingStatus !== "cancelled") {
+                throw new Error("This slot was just booked. Please choose another time.");
+            }
+            // Rebook by replacing a previously-cancelled slot doc.
+            await ref.set(createPayload);
+        } else if (typeof ref.create === "function") {
             await ref.create(createPayload);
         } else {
             await ref.set(createPayload);
@@ -201,7 +285,7 @@ async function saveBookingToFirestore(booking) {
         const code = String(error?.code || "").toLowerCase();
         const msg = String(error?.message || "").toLowerCase();
 
-        if (code === "already-exists" || msg.includes("already exists")) {
+        if (code === "already-exists" || msg.includes("already exists") || msg.includes("just booked")) {
             throw new Error("This slot was just booked. Please choose another time.");
         }
         if (code === "permission-denied") {
@@ -326,14 +410,33 @@ function sendBookingEmail() {
         setTimeout(sendBookingEmail, 500);
         return;
     }
+
+    const firstName = (clientInfo.name || '').trim().split(/\s+/)[0] || 'Client';
+    const bookingCode = lastBookingCode || '';
+    const serviceName = selectedService?.name || '';
+    const mapUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(PRICING.address)}`;
+
     const templateParams = {
-        service: selectedService?.name || '',
+        // New template placeholders
+        first_name: firstName,
+        appointment_id: bookingCode,
+        service: serviceName,
         date: selectedDay?.toLocaleDateString() || '',
         time: selectedSlot?.label || '',
+        barber: 'AMK Cuts',
+        price: serviceName.toLowerCase().includes('beard') ? '$25' : '$20',
+        location: PRICING.address,
+        cancellation_policy: 'To cancel or reschedule, use your Booking ID in Manage Booking.',
+        contact_phone: clientInfo.phone || '',
+        contact_email: clientInfo.email || '',
+        map_url: mapUrl,
+        website_link: window.location.origin,
+        email: clientInfo.email || '',
+
+        // Backward-compatible variables used by older templates
         name: clientInfo.name,
         phone: clientInfo.phone,
-        email: clientInfo.email,
-        booking_code: lastBookingCode || ''
+        booking_code: bookingCode
     };
     // Send to client (auto reply)
     if (clientInfo.email) {
@@ -392,6 +495,10 @@ function removeBookingLocally(bookingId) {
     saveBookings();
 }
 
+function cancelBookingLocally(bookingId) {
+    removeBookingLocally(bookingId);
+}
+
 function upsertBookingLocally(booking) {
     removeBookingLocally(booking._id);
     addBookingLocally(booking);
@@ -401,11 +508,48 @@ function isValidManageLookupInput(phoneDigits, bookingCode) {
     return /^\d{7,15}$/.test(phoneDigits) && /^\d{6}$/.test(bookingCode);
 }
 
-function getManageProof() {
-    return {
-        phoneNormalized: normalizePhone(manageLookupPhone),
-        bookingCode: String(manageLookupCode || "").trim()
+function sanitizeManageProof(inputProof = {}, booking = null, docData = null) {
+    const fallbackRawPhone = String(
+        docData?.client?.phone ||
+        booking?.client?.phone ||
+        inputProof.phone ||
+        manageLookupPhone ||
+        ""
+    ).trim();
+
+    const fallbackPhoneNormalized = normalizePhone(
+        docData?.client?.phoneNormalized ||
+        booking?.client?.phoneNormalized ||
+        inputProof.phoneNormalized ||
+        fallbackRawPhone
+    );
+
+    const bookingCode = String(
+        docData?.bookingCode ||
+        booking?.bookingCode ||
+        inputProof.bookingCode ||
+        manageLookupCode ||
+        ""
+    ).trim();
+
+    const proof = {
+        bookingCode,
+        phoneNormalized: fallbackPhoneNormalized
     };
+
+    if (fallbackRawPhone) {
+        proof.phone = fallbackRawPhone;
+    }
+
+    return proof;
+}
+
+function getManageProof(booking = null) {
+    return sanitizeManageProof({}, booking, null);
+}
+
+function buildManageProofFromDocData(docData, fallbackProof = {}, booking = null) {
+    return sanitizeManageProof(fallbackProof, booking, docData);
 }
 
 async function findBookingsByPhoneAndCode(phoneRaw, bookingCodeRaw) {
@@ -440,26 +584,103 @@ async function findBookingsByPhoneAndCode(phoneRaw, bookingCodeRaw) {
     return matches.sort((a, b) => (a.date === b.date ? a.hour - b.hour : a.date.localeCompare(b.date)));
 }
 
+function createManagedBookingError(code, message) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
+}
+
+function isPossiblyValidProofForLookup(proof) {
+    return isValidManageLookupInput(String(proof?.phoneNormalized || ""), String(proof?.bookingCode || ""));
+}
+
+async function cancelBookingInFirestore(booking, manageProof) {
+    const ref = db.collection(BOOKINGS_COLLECTION).doc(booking._id);
+
+    try {
+        await ref.delete();
+        return { _alreadyCancelled: false, _deleted: true };
+    } catch (deleteError) {
+        // Backward-compatible fallback for stricter deployed rules: mark cancelled, then delete.
+        const snap = await ref.get();
+        if (!snap.exists) {
+            return { _alreadyCancelled: true, _deleted: true };
+        }
+
+        const proof = buildManageProofFromDocData(snap.data(), manageProof, booking);
+        if (!isPossiblyValidProofForLookup(proof)) {
+            throw createManagedBookingError("failed-precondition", "Lookup proof is invalid for cancellation.");
+        }
+
+        await ref.update({
+            status: "cancelled",
+            cancelledAt: firebase.firestore.FieldValue.serverTimestamp(),
+            manageProof: proof
+        });
+
+        await ref.delete();
+        return { _alreadyCancelled: false, _deleted: true };
+    }
+}
+
 async function cancelManagedBooking(booking, manageProof) {
     if (!booking?._id) throw new Error("Booking id is missing.");
 
     if (!db) {
-        removeBookingLocally(booking._id);
-        return;
+        cancelBookingLocally(booking._id);
+        return { _savedLocallyOnly: true };
     }
 
+    const canonicalProof = sanitizeManageProof(manageProof || {}, booking, null);
+
     try {
-        await db.collection(BOOKINGS_COLLECTION).doc(booking._id).update({
-            status: "cancelled",
-            cancelledAt: firebase.firestore.FieldValue.serverTimestamp(),
-            manageProof
-        });
+        const result = await cancelBookingInFirestore(booking, canonicalProof);
+        cancelBookingLocally(booking._id);
+        return { _savedLocallyOnly: false, _alreadyCancelled: !!result?._alreadyCancelled };
     } catch (error) {
-        if (isFirestoreUnavailableError(error)) {
-            removeBookingLocally(booking._id);
-            return;
+        const code = String(error?.code || "").toLowerCase();
+
+        if (code === "permission-denied") {
+            try {
+                const latestSnap = await db.collection(BOOKINGS_COLLECTION).doc(booking._id).get();
+                if (!latestSnap.exists) {
+                    throw createManagedBookingError("not-found", "Booking was not found.");
+                }
+
+                const latestData = latestSnap.data() || {};
+                const latestStatus = String(latestData.status || "active").toLowerCase();
+                if (latestStatus === "cancelled") {
+                    cancelBookingLocally(booking._id);
+                    return { _savedLocallyOnly: false, _alreadyCancelled: true };
+                }
+
+                const retryProof = buildManageProofFromDocData(latestData, canonicalProof, booking);
+                if (!isPossiblyValidProofForLookup(retryProof)) {
+                    throw createManagedBookingError("failed-precondition", "Lookup proof is invalid for cancellation.");
+                }
+
+                await db.collection(BOOKINGS_COLLECTION).doc(booking._id).update({
+                    status: "cancelled",
+                    cancelledAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    manageProof: retryProof
+                });
+
+                cancelBookingLocally(booking._id);
+                return { _savedLocallyOnly: false, _usedFreshProofRetry: true };
+            } catch (retryError) {
+                if (!isFirestoreUnavailableError(retryError)) {
+                    throw mapManagedBookingError(retryError);
+                }
+            }
         }
-        throw error;
+
+        if (isFirestoreUnavailableError(error)) {
+            console.warn("Firestore unavailable, applying local cancellation fallback.", error);
+            cancelBookingLocally(booking._id);
+            return { _savedLocallyOnly: true };
+        }
+
+        throw mapManagedBookingError(error);
     }
 }
 
@@ -476,7 +697,7 @@ async function rescheduleManagedBooking(booking, newDate, newSlot, manageProof) 
     }, `${newDate}_${newSlot.hour}`);
 
     if (!db) {
-        removeBookingLocally(booking._id);
+        cancelBookingLocally(booking._id);
         addBookingLocally(newBooking);
         return newBooking;
     }
@@ -486,8 +707,9 @@ async function rescheduleManagedBooking(booking, newDate, newSlot, manageProof) 
         return { ...newBooking, _id: newBookingId };
     } catch (error) {
         if (isFirestoreUnavailableError(error)) {
-            removeBookingLocally(booking._id);
-            upsertBookingLocally(newBooking);
+            console.warn("Firestore unavailable, applying local reschedule fallback.", error);
+            cancelBookingLocally(booking._id);
+            addBookingLocally(newBooking);
             return newBooking;
         }
         throw error;
@@ -1033,7 +1255,7 @@ function render() {
                     setTimeout(() => {
                         document.getElementById(`cancel-${i}`).onclick = async () => {
                             try {
-                                await cancelManagedBooking(appt, getManageProof());
+                                await cancelManagedBooking(appt, getManageProof(appt));
                                 await loadBookingsFromFirestore();
                                 manageStep = 3;
                                 render();
@@ -1135,7 +1357,7 @@ function render() {
                         bookingToEdit,
                         getDayKey(bookingToEdit._newDay),
                         bookingToEdit._newSlot,
-                        getManageProof()
+                        getManageProof(bookingToEdit)
                     );
                     await loadBookingsFromFirestore();
                     manageStep = 5;
@@ -1175,6 +1397,11 @@ function render() {
 
 // On page load, fetch bookings before first render so availability is correct.
 window.onload = async function () {
-    await loadBookingsFromFirestore();
+    render();
+    try {
+        await loadBookingsFromFirestore();
+    } catch (error) {
+        console.error("Initial bookings load failed:", error);
+    }
     render();
 };

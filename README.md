@@ -18,11 +18,13 @@ firebase login
 firebase use test-323a0
 ```
 
-## 2) Deploy Firestore rules + indexes
+## 2) Deploy Firestore rules + indexes (Spark-safe)
 
 ```bash
 firebase deploy --only firestore:rules,firestore:indexes
 ```
+
+Do not run `firebase deploy --only functions:...` on Spark, because Cloud Functions requires Blaze billing.
 
 ## Manage Booking Flow (No OTP)
 

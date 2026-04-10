@@ -86,6 +86,24 @@ async function findBookingByPhoneAndCode(phoneNormalized, bookingCode) {
   return { id: doc.id, data: doc.data() };
 }
 
+function validateManagedCancelPayload(data) {
+  const phoneNormalized = normalizePhone(data?.phone || data?.phoneNormalized || "");
+  const bookingCode = String(data?.bookingCode || "").trim();
+  const bookingId = String(data?.bookingId || "").trim();
+
+  if (!/^[0-9]{7,15}$/.test(phoneNormalized)) {
+    throw new functions.https.HttpsError("invalid-argument", "Phone number is invalid.");
+  }
+  if (!isValidBookingCode(bookingCode)) {
+    throw new functions.https.HttpsError("invalid-argument", "Booking code must be 6 digits.");
+  }
+  if (!bookingId) {
+    throw new functions.https.HttpsError("invalid-argument", "bookingId is required.");
+  }
+
+  return { phoneNormalized, bookingCode, bookingId };
+}
+
 async function assertOtpRateLimit(phoneNormalized) {
   const ref = db.collection(OTP_RATE_COLLECTION).doc(phoneNormalized);
   const nowMs = Date.now();
@@ -259,6 +277,18 @@ exports.cancelBooking = functions.region("us-central1").https.onCall(async (data
   return { success: true };
 });
 
+exports.cancelManagedBooking = functions.region("us-central1").https.onCall(async (data) => {
+  const { phoneNormalized, bookingCode, bookingId } = validateManagedCancelPayload(data);
+  const booking = await findBookingByPhoneAndCode(phoneNormalized, bookingCode);
+
+  if (booking.id !== bookingId) {
+    throw new functions.https.HttpsError("permission-denied", "Booking details do not match.");
+  }
+
+  await db.collection(BOOKINGS_COLLECTION).doc(bookingId).delete();
+  return { success: true };
+});
+
 exports.rescheduleBooking = functions.region("us-central1").https.onCall(async (data) => {
   const accessToken = String(data?.accessToken || "").trim();
   const bookingId = String(data?.bookingId || "").trim();
@@ -304,3 +334,49 @@ exports.rescheduleBooking = functions.region("us-central1").https.onCall(async (
   return { success: true, bookingId: newBookingId };
 });
 
+exports.rescheduleManagedBooking = functions.region("us-central1").https.onCall(async (data) => {
+  const { phoneNormalized, bookingCode, bookingId } = validateManagedCancelPayload(data);
+  const newDate = String(data?.newDate || "").trim();
+  const newHour = Number(data?.newHour);
+  const newLabel = String(data?.newLabel || "").trim();
+
+  if (!isValidDate(newDate) || !Number.isInteger(newHour) || newHour < 0 || newHour > 23) {
+    throw new functions.https.HttpsError("invalid-argument", "Invalid reschedule payload.");
+  }
+
+  const booking = await findBookingByPhoneAndCode(phoneNormalized, bookingCode);
+  if (booking.id !== bookingId) {
+    throw new functions.https.HttpsError("permission-denied", "Booking details do not match.");
+  }
+
+  const oldRef = db.collection(BOOKINGS_COLLECTION).doc(bookingId);
+  const newBookingId = `${newDate}_${newHour}`;
+  const newRef = db.collection(BOOKINGS_COLLECTION).doc(newBookingId);
+
+  if (newBookingId === bookingId) {
+    throw new functions.https.HttpsError("failed-precondition", "Please choose a different time slot.");
+  }
+
+  await db.runTransaction(async (tx) => {
+    const [oldSnap, newSnap] = await Promise.all([tx.get(oldRef), tx.get(newRef)]);
+
+    if (!oldSnap.exists) {
+      throw new functions.https.HttpsError("not-found", "Original booking was not found.");
+    }
+    if (newSnap.exists) {
+      throw new functions.https.HttpsError("already-exists", "That new slot is already booked.");
+    }
+
+    const oldData = oldSnap.data();
+    tx.set(newRef, {
+      ...oldData,
+      date: newDate,
+      hour: newHour,
+      label: newLabel || oldData.label || "",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    tx.delete(oldRef);
+  });
+
+  return { success: true, bookingId: newBookingId };
+});

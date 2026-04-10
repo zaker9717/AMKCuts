@@ -44,11 +44,18 @@ service cloud.firestore {
 
     function isValidManageProof(p, data) {
       return p is map
-        && p.keys().hasOnly(['phoneNormalized', 'bookingCode'])
-        && p.phoneNormalized is string
+        && p.keys().hasOnly(['bookingCode', 'phoneNormalized', 'phone'])
         && p.bookingCode is string
-        && p.phoneNormalized == data.client.phoneNormalized
-        && p.bookingCode == data.bookingCode;
+        && p.bookingCode.matches('^\\d{6}$')
+        // Enforce booking-code match when stored as string; tolerate legacy non-string values.
+        && (!(data.bookingCode is string) || p.bookingCode == data.bookingCode)
+        && p.phoneNormalized is string
+        && p.phoneNormalized.matches('^\\d{7,15}$')
+        // Enforce phoneNormalized match when present on the stored booking.
+        && (!((data.client is map) && (data.client.phoneNormalized is string))
+          || p.phoneNormalized == data.client.phoneNormalized)
+        && (!p.keys().hasAny(['phone'])
+          || (p.phone is string && p.phone.size() > 0 && p.phone.size() <= 30));
     }
 
     function isValidBookingData(data) {
@@ -65,17 +72,24 @@ service cloud.firestore {
     }
 
     function isValidCancellationUpdate(resourceData, requestData) {
-      return requestData.keys().hasOnly(['hour', 'label', 'bookingCode', 'status', 'client', 'service', 'date', 'createdAt', 'cancelledAt', 'movedTo', 'manageProof'])
-        && requestData.hour == resourceData.hour
-        && requestData.label == resourceData.label
-        && requestData.bookingCode == resourceData.bookingCode
-        && requestData.client == resourceData.client
-        && requestData['service'] == resourceData['service']
-        && requestData.date == resourceData.date
+      return requestData.diff(resourceData).affectedKeys().hasOnly(['status', 'cancelledAt', 'movedTo', 'manageProof'])
         && requestData.status == 'cancelled'
         && requestData.cancelledAt is timestamp
-        && (!requestData.keys().hasAny(['movedTo']) || (requestData.movedTo is string && requestData.movedTo.matches('^\\d{4}-\\d{2}-\\d{2}_[0-9]{1,2}$')))
-        && isValidManageProof(requestData.manageProof, resourceData);
+        && (
+          !requestData.diff(resourceData).affectedKeys().hasAny(['movedTo'])
+          || (requestData.movedTo is string && requestData.movedTo.matches('^\\d{4}-\\d{2}-\\d{2}_[0-9]{1,2}$'))
+        )
+        && (
+          !requestData.diff(resourceData).affectedKeys().hasAny(['manageProof'])
+          || isValidManageProof(requestData.manageProof, resourceData)
+        );
+    }
+
+    function isValidRebookingUpdate(resourceData, requestData) {
+      return resourceData.status == 'cancelled'
+        && isValidBookingData(requestData)
+        && requestData.date == resourceData.date
+        && requestData.hour == resourceData.hour;
     }
 
     match /bookings/{bookingId} {
@@ -85,10 +99,12 @@ service cloud.firestore {
         && bookingId.matches('^\\d{4}-\\d{2}-\\d{2}_[0-9]{1,2}$')
         && !exists(/databases/$(database)/documents/bookings/$(bookingId));
 
-      allow update: if isValidCancellationUpdate(resource.data, request.resource.data)
-        && resource.data.status != 'cancelled';
+      allow update: if (
+          isValidCancellationUpdate(resource.data, request.resource.data)
+          && resource.data.status != 'cancelled'
+        ) || isValidRebookingUpdate(resource.data, request.resource.data);
 
-      allow delete: if false;
+      allow delete: if true;
     }
   }
 }
