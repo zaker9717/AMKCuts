@@ -21,19 +21,39 @@ const HOURS = Array.from({ length: 24 }, (_, i) => {
     return { value: i, label: `${h}:00 ${ampm}` };
 });
 
-// --- FIREBASE SETUP ---
+// --- FIREBASE SETUP (compat SDK loaded in index.html) ---
 const firebaseConfig = {
-    apiKey: "AIzaSyD3JSC7IymUdEQIOFpY2Sc7kXKhcTwIUPs",
-    authDomain: "barber-booking-1575c.firebaseapp.com",
-    projectId: "barber-booking-1575c",
-    storageBucket: "barber-booking-1575c.firebasestorage.app",
-    messagingSenderId: "738769582633",
-    appId: "1:738769582633:web:a7c5bb1290f40b53f93a38",
-    measurementId: "G-MM82WMY3W8"
+    apiKey: "AIzaSyCvvy79sO08nQ_qH2fydW1H_LEMI-CYMOk",
+    authDomain: "test-323a0.firebaseapp.com",
+    projectId: "test-323a0",
+    storageBucket: "test-323a0.firebasestorage.app",
+    messagingSenderId: "437177309817",
+    appId: "1:437177309817:web:b14e49d1bfbd2e3131d2a8",
+    measurementId: "G-TV2NDMQ9HX"
 };
 
-firebase.initializeApp(firebaseConfig);
-const db = firebase.firestore();
+const BOOKINGS_COLLECTION = "bookings";
+const MANAGE_LOOKUP_COOLDOWN_MS = 5000;
+let db = null;
+
+if (typeof firebase !== "undefined" && firebase.apps) {
+    if (!firebase.apps.length) {
+        firebase.initializeApp(firebaseConfig);
+    }
+    db = firebase.firestore();
+    try {
+        // Safari + localhost can fail Firestore streaming; force long polling and merge settings safely.
+        db.settings({
+            experimentalForceLongPolling: true,
+            useFetchStreams: false,
+            merge: true
+        });
+    } catch (error) {
+        console.warn("Could not apply Firestore transport settings.", error);
+    }
+} else {
+    console.warn("Firebase compat SDK was not found. Falling back to localStorage only.");
+}
 
 function generateSlots(start, end, duration, booked = []) {
     const slots = [];
@@ -56,6 +76,186 @@ function getNextDays(count = 14) {
 }
 function getDayKey(date) {
     return date.toISOString().split("T")[0];
+}
+
+function normalizePhone(phone) {
+    return String(phone || "").replace(/\D/g, "");
+}
+
+function generateBookingCode() {
+    // Human-friendly 6-digit code to retrieve/manage a booking later.
+    return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// --- LocalStorage persistence for bookings ---
+function saveBookings() {
+    localStorage.setItem("barber_bookings", JSON.stringify(bookings));
+}
+
+function loadBookings() {
+    const data = localStorage.getItem("barber_bookings");
+    if (data) {
+        try {
+            bookings = JSON.parse(data);
+        } catch (e) {
+            bookings = {};
+        }
+    }
+}
+
+function normalizeBooking(raw, docId) {
+    const hour = Number(raw?.hour);
+    const status = raw?.status === "cancelled" ? "cancelled" : "active";
+    return {
+        _id: docId || raw?._id,
+        hour,
+        label: raw?.label || HOURS[hour]?.label || "",
+        bookingCode: String(raw?.bookingCode || ""),
+        status,
+        client: {
+            name: raw?.client?.name || "",
+            phone: raw?.client?.phone || "",
+            phoneNormalized: raw?.client?.phoneNormalized || normalizePhone(raw?.client?.phone || ""),
+            email: raw?.client?.email || ""
+        },
+        service: {
+            id: raw?.service?.id || "",
+            name: raw?.service?.name || "Service",
+            duration: Number(raw?.service?.duration) || 60
+        },
+        date: raw?.date || ""
+    };
+}
+
+async function loadBookingsFromFirestore() {
+    if (!db) {
+        loadBookings();
+        return;
+    }
+    try {
+        const snapshot = await db.collection(BOOKINGS_COLLECTION).get();
+        const grouped = {};
+        snapshot.forEach((doc) => {
+            const booking = normalizeBooking(doc.data(), doc.id);
+            if (!booking.date || booking.status === "cancelled") return;
+            if (!grouped[booking.date]) grouped[booking.date] = [];
+            grouped[booking.date].push(booking);
+        });
+        Object.values(grouped).forEach((arr) => arr.sort((a, b) => a.hour - b.hour));
+        bookings = grouped;
+        saveBookings();
+    } catch (error) {
+        const code = String(error?.code || "").toLowerCase();
+        if (code === "permission-denied") {
+            console.warn("Firestore read blocked by rules. Using local cache until rules are deployed.");
+            loadBookings();
+            return;
+        }
+        console.error("Failed to load bookings from Firestore. Using local cache.", error);
+        loadBookings();
+    }
+}
+
+function isFirestoreUnavailableError(error) {
+    const code = String(error?.code || "").toLowerCase();
+    const msg = String(error?.message || "").toLowerCase();
+
+    // Keep slot-conflict behavior strict; only fallback for infrastructure/service issues.
+    if (msg.includes("slot was just booked")) return false;
+
+    return (
+        code === "unavailable" ||
+        code === "failed-precondition" ||
+        msg.includes("firestore api has not been used") ||
+        msg.includes("firestore.googleapis.com") ||
+        msg.includes("network") ||
+        msg.includes("offline")
+    );
+}
+
+async function saveBookingToFirestore(booking) {
+    if (!db) {
+        return { ...normalizeBooking(booking), _id: `${booking.date}_${booking.hour}` };
+    }
+
+    const bookingId = `${booking.date}_${booking.hour}`;
+    const ref = db.collection(BOOKINGS_COLLECTION).doc(bookingId);
+    const payload = normalizeBooking(booking, bookingId);
+    const createPayload = {
+        hour: payload.hour,
+        label: payload.label,
+        bookingCode: payload.bookingCode,
+        client: payload.client,
+        service: payload.service,
+        date: payload.date,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+
+    try {
+        if (typeof ref.create === "function") {
+            await ref.create(createPayload);
+        } else {
+            await ref.set(createPayload);
+        }
+    } catch (error) {
+        const code = String(error?.code || "").toLowerCase();
+        const msg = String(error?.message || "").toLowerCase();
+
+        if (code === "already-exists" || msg.includes("already exists")) {
+            throw new Error("This slot was just booked. Please choose another time.");
+        }
+        if (code === "permission-denied") {
+            throw new Error("Booking is blocked by Firestore rules. Deploy the latest firestore rules, then refresh.");
+        }
+        throw error;
+    }
+
+    return payload;
+}
+
+async function rescheduleBookingInFirestore(booking, newDate, newHour, newLabel, manageProof) {
+    if (!db || !booking?._id) {
+        throw new Error("Firestore is not available for rescheduling.");
+    }
+
+    const newBookingId = `${newDate}_${newHour}`;
+    if (newBookingId === booking._id) {
+        throw new Error("Please choose a different time slot.");
+    }
+
+    const oldRef = db.collection(BOOKINGS_COLLECTION).doc(booking._id);
+    const newRef = db.collection(BOOKINGS_COLLECTION).doc(newBookingId);
+
+    await db.runTransaction(async (transaction) => {
+        const [oldSnap, newSnap] = await Promise.all([transaction.get(oldRef), transaction.get(newRef)]);
+        if (!oldSnap.exists) {
+            throw new Error("Original booking was not found.");
+        }
+        if (newSnap.exists) {
+            throw new Error("That new slot is already booked.");
+        }
+
+        const oldData = normalizeBooking(oldSnap.data(), booking._id);
+        transaction.set(newRef, {
+            hour: newHour,
+            label: newLabel || oldData.label || "",
+            bookingCode: oldData.bookingCode,
+            status: "active",
+            client: oldData.client,
+            service: oldData.service,
+            date: newDate,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+
+        transaction.update(oldRef, {
+            status: "cancelled",
+            movedTo: newBookingId,
+            manageProof,
+            cancelledAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+    });
+
+    return newBookingId;
 }
 
 // State
@@ -102,6 +302,11 @@ let adminTab = "schedule";
 let manageStep = 1;
 let foundBookings = [];
 let bookingToEdit = null;
+let lastBookingCode = "";
+let manageLookupPhone = "";
+let manageLookupCode = "";
+let lastManageLookupAt = 0;
+let lastBookingSavedLocally = false;
 
 // --- EmailJS integration ---
 // Add this to your HTML <head> if not already present:
@@ -128,6 +333,7 @@ function sendBookingEmail() {
         name: clientInfo.name,
         phone: clientInfo.phone,
         email: clientInfo.email,
+        booking_code: lastBookingCode || ''
     };
     // Send to client (auto reply)
     if (clientInfo.email) {
@@ -148,35 +354,149 @@ function sendBookingEmail() {
 }
 
 // --- Firestore booking helpers ---
-// --- Booking helpers (localStorage only) ---
-function addBooking(booking) {
+function addBookingLocally(booking) {
     if (!bookings[booking.date]) bookings[booking.date] = [];
     bookings[booking.date].push(booking);
+    bookings[booking.date].sort((a, b) => a.hour - b.hour);
     saveBookings();
 }
 
+async function addBooking(booking) {
+    const localBooking = { ...normalizeBooking(booking), _id: `${booking.date}_${booking.hour}`, status: "active" };
 
-// --- Patch booking actions ---
-// On page load, load availability and bookings from Firestore, then render
-loadAvailability();
-loadBookings();
-render();
+    if (!db) {
+        addBookingLocally(localBooking);
+        return { ...localBooking, _savedLocallyOnly: true };
+    }
 
-// --- LocalStorage persistence for bookings ---
-function saveBookings() {
-    localStorage.setItem('barber_bookings', JSON.stringify(bookings));
-}
-function loadBookings() {
-    const data = localStorage.getItem('barber_bookings');
-    if (data) {
-        try {
-            bookings = JSON.parse(data);
-        } catch (e) {
-            bookings = {};
+    try {
+        const saved = await saveBookingToFirestore(booking);
+        await loadBookingsFromFirestore();
+        return { ...saved, _savedLocallyOnly: false };
+    } catch (error) {
+        if (isFirestoreUnavailableError(error)) {
+            console.warn("Firestore unavailable, saving booking locally.", error);
+            addBookingLocally(localBooking);
+            return { ...localBooking, _savedLocallyOnly: true };
         }
+        throw error;
     }
 }
 
+function removeBookingLocally(bookingId) {
+    if (!bookingId) return;
+    Object.keys(bookings).forEach((dateKey) => {
+        bookings[dateKey] = (bookings[dateKey] || []).filter((b) => b._id !== bookingId);
+        if (bookings[dateKey].length === 0) delete bookings[dateKey];
+    });
+    saveBookings();
+}
+
+function upsertBookingLocally(booking) {
+    removeBookingLocally(booking._id);
+    addBookingLocally(booking);
+}
+
+function isValidManageLookupInput(phoneDigits, bookingCode) {
+    return /^\d{7,15}$/.test(phoneDigits) && /^\d{6}$/.test(bookingCode);
+}
+
+function getManageProof() {
+    return {
+        phoneNormalized: normalizePhone(manageLookupPhone),
+        bookingCode: String(manageLookupCode || "").trim()
+    };
+}
+
+async function findBookingsByPhoneAndCode(phoneRaw, bookingCodeRaw) {
+    const targetPhone = normalizePhone(phoneRaw);
+    const targetCode = String(bookingCodeRaw || "").trim();
+
+    if (!isValidManageLookupInput(targetPhone, targetCode)) return [];
+
+    if (!db) {
+        return Object.entries(bookings)
+            .flatMap(([date, appts]) => appts.map((a) => ({ ...a, date })))
+            .filter((b) => {
+                const normalizedStored = b?.client?.phoneNormalized || normalizePhone(b?.client?.phone);
+                return b?.status !== "cancelled" && normalizedStored === targetPhone && String(b?.bookingCode || "") === targetCode;
+            })
+            .sort((a, b) => (a.date === b.date ? a.hour - b.hour : a.date.localeCompare(b.date)));
+    }
+
+    const snapshot = await db
+        .collection(BOOKINGS_COLLECTION)
+        .where("client.phoneNormalized", "==", targetPhone)
+        .where("bookingCode", "==", targetCode)
+        .limit(10)
+        .get();
+
+    const matches = [];
+    snapshot.forEach((doc) => {
+        const booking = normalizeBooking(doc.data(), doc.id);
+        if (booking.status !== "cancelled") matches.push(booking);
+    });
+
+    return matches.sort((a, b) => (a.date === b.date ? a.hour - b.hour : a.date.localeCompare(b.date)));
+}
+
+async function cancelManagedBooking(booking, manageProof) {
+    if (!booking?._id) throw new Error("Booking id is missing.");
+
+    if (!db) {
+        removeBookingLocally(booking._id);
+        return;
+    }
+
+    try {
+        await db.collection(BOOKINGS_COLLECTION).doc(booking._id).update({
+            status: "cancelled",
+            cancelledAt: firebase.firestore.FieldValue.serverTimestamp(),
+            manageProof
+        });
+    } catch (error) {
+        if (isFirestoreUnavailableError(error)) {
+            removeBookingLocally(booking._id);
+            return;
+        }
+        throw error;
+    }
+}
+
+async function rescheduleManagedBooking(booking, newDate, newSlot, manageProof) {
+    if (!booking?._id) throw new Error("Booking id is missing.");
+
+    const newBooking = normalizeBooking({
+        ...booking,
+        _id: `${newDate}_${newSlot.hour}`,
+        date: newDate,
+        hour: newSlot.hour,
+        label: newSlot.label,
+        status: "active"
+    }, `${newDate}_${newSlot.hour}`);
+
+    if (!db) {
+        removeBookingLocally(booking._id);
+        addBookingLocally(newBooking);
+        return newBooking;
+    }
+
+    try {
+        const newBookingId = await rescheduleBookingInFirestore(booking, newDate, newSlot.hour, newSlot.label, manageProof);
+        return { ...newBooking, _id: newBookingId };
+    } catch (error) {
+        if (isFirestoreUnavailableError(error)) {
+            removeBookingLocally(booking._id);
+            upsertBookingLocally(newBooking);
+            return newBooking;
+        }
+        throw error;
+    }
+}
+
+// --- Patch booking actions ---
+// Load static availability now; bookings are loaded on window.onload.
+loadAvailability();
 
 // Helper to update the UI
 function render() {
@@ -222,7 +542,15 @@ function render() {
         render();
     };
     const navManage = document.getElementById('nav-manage');
-    if (navManage) navManage.onclick = () => { view = 'manage'; manageStep = 1; foundBookings = []; bookingToEdit = null; render(); };
+    if (navManage) navManage.onclick = () => {
+        view = 'manage';
+        manageStep = 1;
+        foundBookings = [];
+        bookingToEdit = null;
+        manageLookupPhone = "";
+        manageLookupCode = "";
+        render();
+    };
 
     // Main
     const main = document.createElement('main');
@@ -395,20 +723,39 @@ function render() {
             bookBtn.className = 'btn';
             bookBtn.textContent = 'Book';
             bookBtn.disabled = !(clientInfo.name && clientInfo.phone);
-            bookBtn.onclick = () => {
+            bookBtn.onclick = async () => {
                 // Confirm booking
                 if (!selectedDay || !selectedSlot || !selectedService) return;
                 const booking = {
                     hour: selectedSlot.hour,
                     label: selectedSlot.label,
+                    bookingCode: generateBookingCode(),
                     client: { ...clientInfo },
                     service: selectedService,
                     date: getDayKey(selectedDay)
                 };
-                addBooking(booking);
-                sendBookingEmail();
-                step = 4;
-                render();
+
+                bookBtn.disabled = true;
+                try {
+                    let savedBooking;
+                    if (typeof addBooking === "function") {
+                        savedBooking = await addBooking(booking);
+                    } else {
+                        console.warn("addBooking is unavailable at runtime; using local fallback.");
+                        const localBooking = { ...normalizeBooking(booking), _id: `${booking.date}_${booking.hour}`, status: "active" };
+                        addBookingLocally(localBooking);
+                        savedBooking = { ...localBooking, _savedLocallyOnly: true };
+                    }
+                    lastBookingCode = savedBooking?.bookingCode || booking.bookingCode;
+                    lastBookingSavedLocally = !!savedBooking?._savedLocallyOnly;
+                    sendBookingEmail();
+                    step = 4;
+                    render();
+                } catch (error) {
+                    console.error("Booking failed:", error);
+                    render();
+                    alert(error?.message || "Could not save booking. Please try again.");
+                }
             };
             btnRow.appendChild(bookBtn);
             main.appendChild(btnRow);
@@ -437,9 +784,11 @@ function render() {
                     <div class="confirm-row"><span>Service</span><span>${selectedService?.name || ''}</span></div>
                     <div class="confirm-row"><span>Date</span><span>${selectedDay?.toLocaleDateString()}</span></div>
                     <div class="confirm-row"><span>Time</span><span>${selectedSlot?.label || ''}</span></div>
+                    <div class="confirm-row"><span>Booking code</span><span>${lastBookingCode || '-'}</span></div>
                     ${clientInfo.email ? `<div class="confirm-row"><span>Reminder sent to</span><span>${clientInfo.email}</span></div>` : ''}
                 </div>
-                <p style="color:#555;font-size:12px">A reminder will be sent 24 hours before your appointment.</p>
+                <p style="color:#555;font-size:12px">Keep your booking code. You need it to manage this appointment later.</p>
+                ${lastBookingSavedLocally ? '<p style="color:#fbbf24;font-size:12px;margin-top:8px">Saved locally on this device because Firebase is unavailable right now.</p>' : ''}
                 <div style="margin-top:24px"><button class="btn" id="book-another">Book Another</button></div>
             `;
             main.appendChild(card);
@@ -451,6 +800,8 @@ function render() {
                     selectedDay = null;
                     selectedSlot = null;
                     clientInfo = { name: '', phone: '', email: '' };
+                    lastBookingCode = '';
+                    lastBookingSavedLocally = false;
                     render();
                 };
             }, 0);
@@ -593,24 +944,64 @@ function render() {
             group.innerHTML = '<label>Phone Number</label>';
             const phoneInput = document.createElement('input');
             phoneInput.placeholder = '(555) 000-0000';
+            phoneInput.value = manageLookupPhone;
             group.appendChild(phoneInput);
             main.appendChild(group);
+
+            const codeGroup = document.createElement('div');
+            codeGroup.className = 'form-group';
+            codeGroup.innerHTML = '<label>Booking Code</label>';
+            const codeInput = document.createElement('input');
+            codeInput.placeholder = '6-digit code';
+            codeInput.value = manageLookupCode;
+            codeGroup.appendChild(codeInput);
+            main.appendChild(codeGroup);
+
+            const hint = document.createElement('p');
+            hint.style.color = '#888';
+            hint.style.fontSize = '12px';
+            hint.style.marginTop = '6px';
+            hint.textContent = 'Enter the same phone number and booking code used at checkout.';
+            main.appendChild(hint);
+
             const btnRow = document.createElement('div');
             btnRow.className = 'btn-row';
             const findBtn = document.createElement('button');
             findBtn.className = 'btn';
             findBtn.textContent = 'Find Booking';
-            findBtn.onclick = () => {
-                // Search all bookings for this phone
-                foundBookings = Object.entries(bookings).flatMap(([date, appts]) =>
-                    appts.map((a, idx) => ({ ...a, date, idx }))
-                ).filter(b => b.client.phone === phoneInput.value);
-                manageStep = 2;
-                render();
+            findBtn.onclick = async () => {
+                const targetPhone = normalizePhone(phoneInput.value);
+                const targetCode = String(codeInput.value || '').trim();
+
+                if (!isValidManageLookupInput(targetPhone, targetCode)) {
+                    alert('Enter a valid phone number and 6-digit booking code.');
+                    return;
+                }
+
+                if (Date.now() - lastManageLookupAt < MANAGE_LOOKUP_COOLDOWN_MS) {
+                    alert('Please wait a few seconds before trying again.');
+                    return;
+                }
+
+                findBtn.disabled = true;
+                manageLookupPhone = phoneInput.value;
+                manageLookupCode = targetCode;
+                lastManageLookupAt = Date.now();
+
+                try {
+                    foundBookings = await findBookingsByPhoneAndCode(phoneInput.value, targetCode);
+                    manageStep = 2;
+                    render();
+                } catch (error) {
+                    console.error('Failed to find bookings:', error);
+                    findBtn.disabled = false;
+                    alert(error?.message || 'Could not find bookings right now. Please try again.');
+                }
             };
             btnRow.appendChild(findBtn);
             main.appendChild(btnRow);
         }
+
         // Step 2: Show bookings
         if (manageStep === 2) {
             const title = document.createElement('div');
@@ -641,14 +1032,15 @@ function render() {
                     main.appendChild(item);
                     setTimeout(() => {
                         document.getElementById(`cancel-${i}`).onclick = async () => {
-                            // Remove booking
-                            const arr = bookings[appt.date];
-                            arr.splice(appt.idx, 1);
-                            if (arr.length === 0) delete bookings[appt.date];
-                            await deleteBookingFromFirestore(appt._id);
-                            await loadBookingsFromFirestore();
-                            manageStep = 3;
-                            render();
+                            try {
+                                await cancelManagedBooking(appt, getManageProof());
+                                await loadBookingsFromFirestore();
+                                manageStep = 3;
+                                render();
+                            } catch (error) {
+                                console.error("Failed to cancel booking:", error);
+                                alert(error?.message || "Could not cancel this booking right now.");
+                            }
                         };
                         document.getElementById(`resched-${i}`).onclick = () => {
                             bookingToEdit = appt;
@@ -738,23 +1130,20 @@ function render() {
             confirmBtn.textContent = 'Confirm';
             confirmBtn.disabled = !(bookingToEdit._newDay && bookingToEdit._newSlot);
             confirmBtn.onclick = async () => {
-                // Remove old booking
-                const arr = bookings[bookingToEdit.date];
-                arr.splice(bookingToEdit.idx, 1);
-                if (arr.length === 0) delete bookings[bookingToEdit.date];
-                await deleteBookingFromFirestore(bookingToEdit._id);
-                // Add new booking
-                const newBooking = {
-                    hour: bookingToEdit._newSlot.hour,
-                    label: bookingToEdit._newSlot.label,
-                    client: bookingToEdit.client,
-                    service: bookingToEdit.service,
-                    date: getDayKey(bookingToEdit._newDay)
-                };
-                await saveBookingToFirestore(newBooking);
-                await loadBookingsFromFirestore();
-                manageStep = 5;
-                render();
+                try {
+                    await rescheduleManagedBooking(
+                        bookingToEdit,
+                        getDayKey(bookingToEdit._newDay),
+                        bookingToEdit._newSlot,
+                        getManageProof()
+                    );
+                    await loadBookingsFromFirestore();
+                    manageStep = 5;
+                    render();
+                } catch (error) {
+                    console.error("Failed to reschedule booking:", error);
+                    alert(error?.message || "Could not reschedule this booking.");
+                }
             };
             btnRow.appendChild(confirmBtn);
             main.appendChild(btnRow);
@@ -784,7 +1173,8 @@ function render() {
 // Event handlers (to be attached to DOM elements)
 // Example: document.getElementById('service-btn').onclick = ...
 
-// On page load, render the initial UI
-window.onload = function () {
+// On page load, fetch bookings before first render so availability is correct.
+window.onload = async function () {
+    await loadBookingsFromFirestore();
     render();
 };

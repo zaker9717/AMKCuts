@@ -1,0 +1,94 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isValidDate(d) {
+      return d is string && d.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function isValidHour(h) {
+      return h is int && h >= 0 && h <= 23;
+    }
+
+    function isValidBookingCode(code) {
+      return code is string && code.matches('^\\d{6}$');
+    }
+
+    function isValidClient(c) {
+      return c is map
+        && c.keys().hasOnly(['name', 'phone', 'phoneNormalized', 'email'])
+        && c.name is string
+        && c.name.size() > 0
+        && c.name.size() <= 120
+        && c.phone is string
+        && c.phone.size() > 0
+        && c.phone.size() <= 30
+        && c.phoneNormalized is string
+        && c.phoneNormalized.matches('^\\d{7,15}$')
+        && c.email is string
+        && c.email.size() <= 200;
+    }
+
+    function isValidService(s) {
+      return s is map
+        && s.keys().hasOnly(['id', 'name', 'duration'])
+        && s.id is string
+        && s.id.size() > 0
+        && s.id.size() <= 40
+        && s.name is string
+        && s.name.size() > 0
+        && s.name.size() <= 80
+        && s.duration is int
+        && s.duration >= 15
+        && s.duration <= 240;
+    }
+
+    function isValidManageProof(p, data) {
+      return p is map
+        && p.keys().hasOnly(['phoneNormalized', 'bookingCode'])
+        && p.phoneNormalized is string
+        && p.bookingCode is string
+        && p.phoneNormalized == data.client.phoneNormalized
+        && p.bookingCode == data.bookingCode;
+    }
+
+    function isValidBookingData(data) {
+      return data.keys().hasOnly(['hour', 'label', 'bookingCode', 'status', 'client', 'service', 'date', 'createdAt'])
+        && isValidDate(data.date)
+        && isValidHour(data.hour)
+        && data.label is string
+        && data.label.size() > 0
+        && data.label.size() <= 30
+        && isValidBookingCode(data.bookingCode)
+        && isValidClient(data.client)
+        && isValidService(data['service'])
+        && (!data.keys().hasAny(['status']) || data.status == 'active');
+    }
+
+    function isValidCancellationUpdate(resourceData, requestData) {
+      return requestData.keys().hasOnly(['hour', 'label', 'bookingCode', 'status', 'client', 'service', 'date', 'createdAt', 'cancelledAt', 'movedTo', 'manageProof'])
+        && requestData.hour == resourceData.hour
+        && requestData.label == resourceData.label
+        && requestData.bookingCode == resourceData.bookingCode
+        && requestData.client == resourceData.client
+        && requestData['service'] == resourceData['service']
+        && requestData.date == resourceData.date
+        && requestData.status == 'cancelled'
+        && requestData.cancelledAt is timestamp
+        && (!requestData.keys().hasAny(['movedTo']) || (requestData.movedTo is string && requestData.movedTo.matches('^\\d{4}-\\d{2}-\\d{2}_[0-9]{1,2}$')))
+        && isValidManageProof(requestData.manageProof, resourceData);
+    }
+
+    match /bookings/{bookingId} {
+      allow get, list: if true;
+
+      allow create: if isValidBookingData(request.resource.data)
+        && bookingId.matches('^\\d{4}-\\d{2}-\\d{2}_[0-9]{1,2}$')
+        && !exists(/databases/$(database)/documents/bookings/$(bookingId));
+
+      allow update: if isValidCancellationUpdate(resource.data, request.resource.data)
+        && resource.data.status != 'cancelled';
+
+      allow delete: if false;
+    }
+  }
+}

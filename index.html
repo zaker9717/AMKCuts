@@ -12,7 +12,12 @@
 
 <body>
     <div id="app-root"></div>
-    <script src="app.js"></script>
+    <script>
+        // Always fetch latest app bundle from JetBrains local server (avoid stale cache).
+        const appScript = document.createElement("script");
+        appScript.src = `app.js?t=${Date.now()}`;
+        document.body.appendChild(appScript);
+    </script>
 </body>
 
 </html>
