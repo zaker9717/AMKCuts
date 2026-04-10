@@ -489,7 +489,14 @@ function sendBookingEmail() {
     const firstName = (clientInfo.name || '').trim().split(/\s+/)[0] || 'Client';
     const bookingCode = lastBookingCode || '';
     const serviceName = selectedService?.name || '';
-    const mapUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(PRICING.address)}`;
+
+    // Detect if user is on iOS for Apple Maps fallback
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+
+    // Build appropriate maps URL based on device
+    const mapsUrl = isIOS
+        ? `https://maps.apple.com/?address=${encodeURIComponent(PRICING.address)}`
+        : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(PRICING.address)}`;
 
     const templateParams = {
         // New template placeholders
@@ -504,7 +511,7 @@ function sendBookingEmail() {
         cancellation_policy: 'To cancel or reschedule, use your Booking ID in Manage Booking.',
         contact_phone: clientInfo.phone || '',
         contact_email: clientInfo.email || '',
-        map_url: mapUrl,
+        map_url: mapsUrl,
         website_link: window.location.origin,
         email: clientInfo.email || '',
 
