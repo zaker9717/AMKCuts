@@ -369,7 +369,7 @@ let bookings = {};
 let adminPass = "";
 let adminUnlocked = false;
 let adminError = "";
-const PASSWORD = "Minihols20";
+let PASSWORD = localStorage.getItem('barber_admin_password') || "Minihols20";
 let availability = {
     0: { open: false, start: 9, end: 18 },
     1: { open: true, start: 9, end: 18 },
@@ -456,6 +456,10 @@ function loadAvailability() {
     }
 }
 let adminTab = "schedule";
+let changePasswordError = "";
+let changePasswordSuccess = "";
+let newPasswordValue = "";
+let securityAnswerError = "";
 
 // Manage Booking state
 let manageStep = 1;
@@ -1205,11 +1209,19 @@ function render() {
             tabs.innerHTML = `
                 <button class="tab-btn${adminTab === 'schedule' ? ' active' : ''}" id="tab-schedule">Schedule</button>
                 <button class="tab-btn${adminTab === 'appointments' ? ' active' : ''}" id="tab-appointments">Appointments</button>
+                <button class="tab-btn${adminTab === 'change-password' ? ' active' : ''}" id="tab-change-password">Change Password</button>
             `;
             main.appendChild(tabs);
             setTimeout(() => {
                 document.getElementById('tab-schedule').onclick = () => { adminTab = 'schedule'; render(); };
                 document.getElementById('tab-appointments').onclick = () => { adminTab = 'appointments'; render(); };
+                document.getElementById('tab-change-password').onclick = () => {
+                    adminTab = 'change-password';
+                    changePasswordError = "";
+                    changePasswordSuccess = "";
+                    securityAnswerError = "";
+                    render();
+                };
             }, 0);
             if (adminTab === 'schedule') {
                 // Weekly hours table
@@ -1291,6 +1303,141 @@ function render() {
                     });
                     main.appendChild(list);
                 }
+            }
+            if (adminTab === 'change-password') {
+                const title = document.createElement('div');
+                title.className = 'section-title';
+                title.textContent = 'Change Password';
+                main.appendChild(title);
+
+                // Security question
+                const questionDiv = document.createElement('div');
+                questionDiv.style.marginBottom = '20px';
+                questionDiv.style.padding = '16px';
+                questionDiv.style.backgroundColor = '#f5f5f5';
+                questionDiv.style.borderRadius = '8px';
+                questionDiv.style.color = '#111';
+
+                const question = document.createElement('p');
+                question.style.margin = '0 0 12px 0';
+                question.style.fontWeight = 'bold';
+                question.style.color = '#111';
+                question.textContent = 'Zaker est fort ou faible? Réponds seulement avec fort ou faible.';
+                questionDiv.appendChild(question);
+
+                const answerInput = document.createElement('input');
+                answerInput.type = 'text';
+                answerInput.placeholder = 'fort ou faible';
+                answerInput.style.width = '100%';
+                answerInput.style.padding = '10px';
+                answerInput.style.marginBottom = '10px';
+                answerInput.style.border = securityAnswerError ? '1px solid #d32f2f' : '1px solid #ddd';
+                answerInput.style.borderRadius = '4px';
+                answerInput.style.boxSizing = 'border-box';
+                answerInput.style.backgroundColor = '#fff';
+                answerInput.style.color = '#111';
+                questionDiv.appendChild(answerInput);
+
+                if (securityAnswerError) {
+                    const securityError = document.createElement('div');
+                    securityError.style.color = '#d32f2f';
+                    securityError.style.fontSize = '14px';
+                    securityError.style.marginTop = '2px';
+                    securityError.textContent = securityAnswerError;
+                    questionDiv.appendChild(securityError);
+                }
+
+                main.appendChild(questionDiv);
+
+                // New password input
+                const newPassGroup = document.createElement('div');
+                newPassGroup.className = 'form-group';
+                newPassGroup.innerHTML = '<label>New Password</label>';
+                const newPassInput = document.createElement('input');
+                newPassInput.type = 'password';
+                newPassInput.placeholder = 'Enter new password';
+                newPassInput.value = newPasswordValue;
+                newPassInput.style.border = changePasswordError ? '1px solid #d32f2f' : '';
+                newPassGroup.appendChild(newPassInput);
+                main.appendChild(newPassGroup);
+
+                if (changePasswordSuccess) {
+                    const successMsg = document.createElement('div');
+                    successMsg.style.color = '#2e7d32';
+                    successMsg.style.marginBottom = '16px';
+                    successMsg.style.fontSize = '14px';
+                    successMsg.textContent = changePasswordSuccess;
+                    main.appendChild(successMsg);
+                }
+
+                if (changePasswordError) {
+                    const errorMsg = document.createElement('div');
+                    errorMsg.style.color = '#d32f2f';
+                    errorMsg.style.marginBottom = '16px';
+                    errorMsg.style.fontSize = '14px';
+                    errorMsg.textContent = changePasswordError;
+                    main.appendChild(errorMsg);
+                }
+
+                // Buttons
+                const btnRow = document.createElement('div');
+                btnRow.className = 'btn-row';
+                const cancelBtn = document.createElement('button');
+                cancelBtn.className = 'btn-outline';
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.onclick = () => {
+                    adminTab = 'schedule';
+                    changePasswordError = "";
+                    changePasswordSuccess = "";
+                    securityAnswerError = "";
+                    newPasswordValue = "";
+                    render();
+                };
+                btnRow.appendChild(cancelBtn);
+
+                const changeBtn = document.createElement('button');
+                changeBtn.className = 'btn';
+                changeBtn.textContent = 'Change Password';
+                changeBtn.onclick = () => {
+                    const answer = answerInput.value.toLowerCase().trim();
+                    const newPass = newPassInput.value.trim();
+
+                    if (answer !== 'fort') {
+                        securityAnswerError = 'Pourquoi tu mens Karim? Tu connais très bien la bonne réponse.';
+                        changePasswordError = "";
+                        changePasswordSuccess = "";
+                        newPasswordValue = newPass;
+                        render();
+                        return;
+                    }
+
+                    if (!newPass || newPass.length < 4) {
+                        changePasswordError = 'Password must be at least 4 characters.';
+                        securityAnswerError = "";
+                        changePasswordSuccess = "";
+                        newPasswordValue = newPass;
+                        render();
+                        return;
+                    }
+
+                    // Update password
+                    Object.defineProperty(window, 'PASSWORD', {
+                        writable: true,
+                        configurable: true,
+                        value: newPass
+                    });
+
+                    localStorage.setItem('barber_admin_password', newPass);
+
+                    changePasswordError = "";
+                    changePasswordSuccess = "Password changed successfully!";
+                    securityAnswerError = "";
+                    newPasswordValue = "";
+
+                    render();
+                };
+                btnRow.appendChild(changeBtn);
+                main.appendChild(btnRow);
             }
         }
     } else if (view === 'manage') {
