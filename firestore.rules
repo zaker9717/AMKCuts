@@ -92,6 +92,32 @@ service cloud.firestore {
         && requestData.hour == resourceData.hour;
     }
 
+    function isValidAvailabilityDayConfig(day) {
+      return day is map
+        && day.keys().hasOnly(['open', 'start', 'end'])
+        && day.open is bool
+        && day.start is int
+        && day.end is int
+        && day.start >= 0
+        && day.start <= 23
+        && day.end >= 0
+        && day.end <= 23;
+    }
+
+    function isValidAvailabilityDoc(data) {
+      return data.keys().hasOnly(['days', 'updatedAt'])
+        && data.days is map
+        && data.days.keys().hasOnly(['0', '1', '2', '3', '4', '5', '6'])
+        && isValidAvailabilityDayConfig(data.days['0'])
+        && isValidAvailabilityDayConfig(data.days['1'])
+        && isValidAvailabilityDayConfig(data.days['2'])
+        && isValidAvailabilityDayConfig(data.days['3'])
+        && isValidAvailabilityDayConfig(data.days['4'])
+        && isValidAvailabilityDayConfig(data.days['5'])
+        && isValidAvailabilityDayConfig(data.days['6'])
+        && data.updatedAt is timestamp;
+    }
+
     match /bookings/{bookingId} {
       allow get, list: if true;
 
@@ -105,6 +131,13 @@ service cloud.firestore {
         ) || isValidRebookingUpdate(resource.data, request.resource.data);
 
       allow delete: if true;
+    }
+
+    match /settings/{docId} {
+      allow get, list: if docId == 'availability';
+      allow create, update: if docId == 'availability'
+        && isValidAvailabilityDoc(request.resource.data);
+      allow delete: if false;
     }
   }
 }

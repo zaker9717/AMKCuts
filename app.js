@@ -33,6 +33,8 @@ const firebaseConfig = {
 };
 
 const BOOKINGS_COLLECTION = "bookings";
+const SETTINGS_COLLECTION = "settings";
+const AVAILABILITY_DOC_ID = "availability";
 const MANAGE_LOOKUP_COOLDOWN_MS = 5000;
 const CANCELLED_BOOKINGS_STORAGE_KEY = "barber_cancelled_bookings";
 let db = null;
@@ -378,8 +380,70 @@ let availability = {
     6: { open: true, start: 10, end: 17 },
 };
 
+function sanitizeAvailabilityDay(dayConfig, fallback) {
+    const base = fallback || { open: false, start: 9, end: 18 };
+    const open = typeof dayConfig?.open === "boolean" ? dayConfig.open : base.open;
+    const start = Number.isInteger(dayConfig?.start) ? dayConfig.start : base.start;
+    const end = Number.isInteger(dayConfig?.end) ? dayConfig.end : base.end;
+
+    return {
+        open,
+        start: Math.min(23, Math.max(0, start)),
+        end: Math.min(23, Math.max(0, end))
+    };
+}
+
+function applyAvailabilityPatch(source) {
+    if (!source || typeof source !== "object") return;
+    for (let i = 0; i < 7; i++) {
+        const key = String(i);
+        if (source[key] || source[i]) {
+            availability[i] = sanitizeAvailabilityDay(source[key] || source[i], availability[i]);
+        }
+    }
+}
+
+function getAvailabilityFirestorePayload() {
+    const days = {};
+    for (let i = 0; i < 7; i++) {
+        days[String(i)] = sanitizeAvailabilityDay(availability[i], { open: false, start: 9, end: 18 });
+    }
+    return {
+        days,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+}
+
+async function saveAvailabilityToFirestore() {
+    if (!db) return false;
+    try {
+        await db.collection(SETTINGS_COLLECTION).doc(AVAILABILITY_DOC_ID).set(getAvailabilityFirestorePayload(), { merge: true });
+        return true;
+    } catch (error) {
+        console.warn("Failed to save availability to Firestore, local cache will still be used.", error);
+        return false;
+    }
+}
+
+async function loadAvailabilityFromFirestore() {
+    if (!db) return false;
+    try {
+        const snap = await db.collection(SETTINGS_COLLECTION).doc(AVAILABILITY_DOC_ID).get();
+        if (!snap.exists) return false;
+
+        const data = snap.data() || {};
+        applyAvailabilityPatch(data.days || {});
+        localStorage.setItem('barber_availability', JSON.stringify(availability));
+        return true;
+    } catch (error) {
+        console.warn("Failed to load availability from Firestore, using local cache.", error);
+        return false;
+    }
+}
+
 function saveAvailability() {
     localStorage.setItem('barber_availability', JSON.stringify(availability));
+    void saveAvailabilityToFirestore();
 }
 
 function loadAvailability() {
@@ -387,10 +451,7 @@ function loadAvailability() {
     if (data) {
         try {
             const parsed = JSON.parse(data);
-            // Only update keys that exist to avoid breaking structure
-            for (let i = 0; i < 7; i++) {
-                if (parsed[i]) availability[i] = parsed[i];
-            }
+            applyAvailabilityPatch(parsed);
         } catch (e) { }
     }
 }
@@ -1412,10 +1473,15 @@ function render() {
 // On page load, fetch bookings before first render so availability is correct.
 window.onload = async function () {
     render();
+
     try {
-        await loadBookingsFromFirestore();
+        await Promise.all([
+            loadBookingsFromFirestore(),
+            loadAvailabilityFromFirestore()
+        ]);
     } catch (error) {
-        console.error("Initial bookings load failed:", error);
+        console.error("Initial data load failed:", error);
     }
+
     render();
 };
