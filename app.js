@@ -320,23 +320,37 @@ async function rescheduleBookingInFirestore(booking, newDate, newHour, newLabel,
         }
 
         const oldData = normalizeBooking(oldSnap.data(), booking._id);
-        transaction.set(newRef, {
+        const rawPhone = String(oldData?.client?.phone || booking?.client?.phone || manageLookupPhone || "").trim();
+        const normalizedPhone = normalizePhone(oldData?.client?.phoneNormalized || rawPhone);
+        if (!/^\d{7,15}$/.test(normalizedPhone)) {
+            throw new Error("Booking phone format is invalid. Please contact AMK Cuts to reschedule this appointment.");
+        }
+
+        const candidateCode = String(oldData?.bookingCode || booking?.bookingCode || "").trim();
+        const bookingCode = /^\d{6}$/.test(candidateCode) ? candidateCode : generateBookingCode();
+
+        const safePayload = {
             hour: newHour,
-            label: newLabel || oldData.label || "",
-            bookingCode: oldData.bookingCode,
+            label: newLabel || oldData.label || HOURS[newHour]?.label || "",
+            bookingCode,
             status: "active",
-            client: oldData.client,
-            service: oldData.service,
+            client: {
+                name: String(oldData?.client?.name || booking?.client?.name || "Client").trim() || "Client",
+                phone: rawPhone || normalizedPhone,
+                phoneNormalized: normalizedPhone,
+                email: String(oldData?.client?.email || booking?.client?.email || "")
+            },
+            service: {
+                id: String(oldData?.service?.id || booking?.service?.id || "cut"),
+                name: String(oldData?.service?.name || booking?.service?.name || "Service"),
+                duration: Number(oldData?.service?.duration || booking?.service?.duration || 60)
+            },
             date: newDate,
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
+        };
 
-        transaction.update(oldRef, {
-            status: "cancelled",
-            movedTo: newBookingId,
-            manageProof,
-            cancelledAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
+        transaction.set(newRef, safePayload);
+        transaction.delete(oldRef);
     });
 
     return newBookingId;
