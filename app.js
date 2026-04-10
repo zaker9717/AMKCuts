@@ -659,6 +659,38 @@ async function findBookingsByPhoneAndCode(phoneRaw, bookingCodeRaw) {
     return matches.sort((a, b) => (a.date === b.date ? a.hour - b.hour : a.date.localeCompare(b.date)));
 }
 
+async function findBookingsByEmailAndCode(emailRaw, bookingCodeRaw) {
+    const targetEmail = String(emailRaw || "").toLowerCase().trim();
+    const targetCode = String(bookingCodeRaw || "").trim();
+
+    if (!targetEmail || !targetEmail.includes("@") || !/^\d{6}$/.test(targetCode)) return [];
+
+    if (!db) {
+        return Object.entries(bookings)
+            .flatMap(([date, appts]) => appts.map((a) => ({ ...a, date })))
+            .filter((b) => {
+                const storedEmail = String(b?.client?.email || "").toLowerCase().trim();
+                return b?.status !== "cancelled" && storedEmail === targetEmail && String(b?.bookingCode || "") === targetCode;
+            })
+            .sort((a, b) => (a.date === b.date ? a.hour - b.hour : a.date.localeCompare(b.date)));
+    }
+
+    const snapshot = await db
+        .collection(BOOKINGS_COLLECTION)
+        .where("client.email", "==", targetEmail)
+        .where("bookingCode", "==", targetCode)
+        .limit(10)
+        .get();
+
+    const matches = [];
+    snapshot.forEach((doc) => {
+        const booking = normalizeBooking(doc.data(), doc.id);
+        if (booking.status !== "cancelled") matches.push(booking);
+    });
+
+    return matches.sort((a, b) => (a.date === b.date ? a.hour - b.hour : a.date.localeCompare(b.date)));
+}
+
 function createManagedBookingError(code, message) {
     const err = new Error(message);
     err.code = code;
@@ -1020,7 +1052,8 @@ function render() {
             bookBtn.className = 'btn';
             bookBtn.textContent = 'Book';
             bookBtn.disabled = !(clientInfo.name && clientInfo.phone);
-            bookBtn.onclick = async () => {
+
+            const handleBooking = async () => {
                 // Confirm booking
                 if (!selectedDay || !selectedSlot || !selectedService) return;
                 const booking = {
@@ -1054,6 +1087,17 @@ function render() {
                     alert(error?.message || "Could not save booking. Please try again.");
                 }
             };
+
+            bookBtn.onclick = handleBooking;
+
+            // Allow Enter key to submit from email field
+            emailInput.onkeydown = (e) => {
+                if (e.key === 'Enter' && !bookBtn.disabled) {
+                    e.preventDefault();
+                    handleBooking();
+                }
+            };
+
             btnRow.appendChild(bookBtn);
             main.appendChild(btnRow);
             // --- Input event handlers for smooth typing ---
@@ -1117,8 +1161,11 @@ function render() {
             `;
             main.appendChild(login);
             setTimeout(() => {
-                document.getElementById('unlock-admin').onclick = () => {
-                    const pass = document.getElementById('admin-pass').value;
+                const passInput = document.getElementById('admin-pass');
+                const unlockBtn = document.getElementById('unlock-admin');
+
+                const handleUnlock = () => {
+                    const pass = passInput.value;
                     if (pass === PASSWORD) {
                         adminUnlocked = true;
                         adminError = '';
@@ -1126,6 +1173,16 @@ function render() {
                         adminError = 'Incorrect password.';
                     }
                     render();
+                };
+
+                unlockBtn.onclick = handleUnlock;
+
+                // Allow Enter key to submit
+                passInput.onkeydown = (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleUnlock();
+                    }
                 };
             }, 0);
         } else {
@@ -1230,26 +1287,27 @@ function render() {
             }
         }
     } else if (view === 'manage') {
-        // Step 1: Enter phone number
+        // Step 1: Enter email and booking code
         if (manageStep === 1) {
             const title = document.createElement('div');
             title.className = 'section-title';
             title.textContent = 'Find Your Booking';
             main.appendChild(title);
-            const group = document.createElement('div');
-            group.className = 'form-group';
-            group.innerHTML = '<label>Phone Number</label>';
-            const phoneInput = document.createElement('input');
-            phoneInput.placeholder = '(555) 000-0000';
-            phoneInput.value = manageLookupPhone;
-            group.appendChild(phoneInput);
-            main.appendChild(group);
+            const emailGroup = document.createElement('div');
+            emailGroup.className = 'form-group';
+            emailGroup.innerHTML = '<label>Email Address (required)</label>';
+            const emailInput = document.createElement('input');
+            emailInput.type = 'email';
+            emailInput.placeholder = 'your@email.com';
+            emailInput.value = manageLookupPhone;
+            emailGroup.appendChild(emailInput);
+            main.appendChild(emailGroup);
 
             const codeGroup = document.createElement('div');
             codeGroup.className = 'form-group';
-            codeGroup.innerHTML = '<label>Booking Code</label>';
+            codeGroup.innerHTML = '<label>Booking Code (6 digits)</label>';
             const codeInput = document.createElement('input');
-            codeInput.placeholder = '6-digit code';
+            codeInput.placeholder = '123456';
             codeInput.value = manageLookupCode;
             codeGroup.appendChild(codeInput);
             main.appendChild(codeGroup);
@@ -1258,7 +1316,7 @@ function render() {
             hint.style.color = '#888';
             hint.style.fontSize = '12px';
             hint.style.marginTop = '6px';
-            hint.textContent = 'Enter the same phone number and booking code used at checkout.';
+            hint.textContent = 'Enter the email and 6-digit booking code from your confirmation.';
             main.appendChild(hint);
 
             const btnRow = document.createElement('div');
@@ -1266,12 +1324,13 @@ function render() {
             const findBtn = document.createElement('button');
             findBtn.className = 'btn';
             findBtn.textContent = 'Find Booking';
-            findBtn.onclick = async () => {
-                const targetPhone = normalizePhone(phoneInput.value);
+
+            const handleFindBooking = async () => {
+                const targetEmail = String(emailInput.value || "").toLowerCase().trim();
                 const targetCode = String(codeInput.value || '').trim();
 
-                if (!isValidManageLookupInput(targetPhone, targetCode)) {
-                    alert('Enter a valid phone number and 6-digit booking code.');
+                if (!targetEmail || !targetEmail.includes("@") || !/^\d{6}$/.test(targetCode)) {
+                    alert('Enter a valid email address and 6-digit booking code.');
                     return;
                 }
 
@@ -1281,12 +1340,12 @@ function render() {
                 }
 
                 findBtn.disabled = true;
-                manageLookupPhone = phoneInput.value;
+                manageLookupPhone = emailInput.value;
                 manageLookupCode = targetCode;
                 lastManageLookupAt = Date.now();
 
                 try {
-                    foundBookings = await findBookingsByPhoneAndCode(phoneInput.value, targetCode);
+                    foundBookings = await findBookingsByEmailAndCode(emailInput.value, targetCode);
                     manageStep = 2;
                     render();
                 } catch (error) {
@@ -1295,6 +1354,23 @@ function render() {
                     alert(error?.message || 'Could not find bookings right now. Please try again.');
                 }
             };
+
+            findBtn.onclick = handleFindBooking;
+
+            // Allow Enter key to submit
+            codeInput.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleFindBooking();
+                }
+            };
+            emailInput.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleFindBooking();
+                }
+            };
+
             btnRow.appendChild(findBtn);
             main.appendChild(btnRow);
         }
