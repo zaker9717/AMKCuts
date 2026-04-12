@@ -1,16 +1,28 @@
 # AMKCuts
 
-## Firestore-Only (Spark-Friendly) Setup
+## Free Hosting Setup
 
-This project runs without Cloud Functions or Twilio.
+This project can be hosted for free on Firebase Hosting.
 
-It uses:
+Best free URL options:
 
-- Firestore rules in `firestore.rules`
-- Firestore indexes in `firestore.indexes.json`
-- Client-side booking management in `app.js`
+- `https://test-323a0.web.app` using the existing project site
+- `https://amkcuts.web.app` if you create a Firebase Hosting site named `amkcuts` inside the same Firebase project
 
-## 1) Install Firebase CLI and login
+## What stays free
+
+- `index.html`, `app.js`, and `style.css` can be served from Firebase Hosting
+- Firestore rules and indexes can be deployed on the free tier
+- The app already supports a Firestore-only flow
+
+## What is not free
+
+- `functions/` uses Firebase Cloud Functions and Twilio
+- Do not deploy `functions/` if you want to stay on the free tier
+
+## Quick deploy
+
+1. Install Firebase CLI and log in
 
 ```bash
 npm install -g firebase-tools
@@ -18,27 +30,24 @@ firebase login
 firebase use test-323a0
 ```
 
-## 2) Deploy Firestore rules + indexes (Spark-safe)
+2. Deploy Hosting plus Firestore config
 
 ```bash
-firebase deploy --only firestore:rules,firestore:indexes
+firebase deploy --only hosting,firestore:rules,firestore:indexes
 ```
 
-Do not run `firebase deploy --only functions:...` on Spark, because Cloud Functions requires Blaze billing.
+3. Open your live site
 
-## Manage Booking Flow (No OTP)
+- Default site: `https://test-323a0.web.app`
+- Desired branded site: `https://amkcuts.web.app` if you create that Hosting site first
+
+## Manage Booking Flow
 
 - Customer enters phone + booking code.
 - App queries Firestore directly using `client.phoneNormalized` + `bookingCode`.
-- Cancel/reschedule are implemented as constrained updates (soft-cancel), not document deletes.
-
-## Lightweight Hardening Included
-
-- Manage lookup validates input format and applies a short client cooldown.
-- Firestore blocks direct `delete` on `bookings`.
-- Firestore allows `update` only for cancellation/reschedule-style transitions with matching `manageProof`.
+- Cancel/reschedule are implemented as constrained updates, not document deletes.
 
 ## Security Note
 
 This is safer than fully open deletes, but still weaker than server-side OTP verification.
-If you need stronger protection against abuse, re-introduce a backend verification layer later.
+If you need stronger protection later, re-introduce a backend verification layer.

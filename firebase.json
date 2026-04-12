@@ -1,4 +1,21 @@
 {
+  "hosting": {
+    "site": "amkcuts",
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "firestore.json",
+      "*.rules",
+      "*.indexes.json",
+      "functions/"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
   "firestore": {
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
