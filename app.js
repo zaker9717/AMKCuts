@@ -1158,7 +1158,7 @@ function renderFooter() {
                     </div>
                 </div>
 
-                <!-- Address & Hours Column -->
+                <!-- Location Column -->
                 <div class="footer-section footer-address">
                     <div class="footer-section-title">Location</div>
                     <div class="address-item">
@@ -1172,23 +1172,6 @@ function renderFooter() {
                         <span class="maps-button-icon">🗺️</span>
                         Open in Maps
                     </button>
-                </div>
-
-                <!-- Hours Column -->
-                <div class="footer-section footer-hours">
-                    <div class="footer-section-title">Hours</div>
-                    <div class="hours-item">
-                        <span class="hours-day">Mon - Fri</span>
-                        <span class="hours-time">9:00 AM - 6:00 PM</span>
-                    </div>
-                    <div class="hours-item">
-                        <span class="hours-day">Saturday</span>
-                        <span class="hours-time">10:00 AM - 5:00 PM</span>
-                    </div>
-                    <div class="hours-item">
-                        <span class="hours-day">Sunday</span>
-                        <span class="hours-closed">Closed</span>
-                    </div>
                 </div>
             </div>
 
